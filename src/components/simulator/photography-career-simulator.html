@@ -1,0 +1,811 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Line } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler
+} from 'chart.js';
+
+// Enregistrer les composants Chart.js
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler
+);
+
+const PhotographyCareerSimulator = () => {
+  // Données de base en Ariary
+  const baseCosts = {
+    '10x15': { ink: 300, paper: 600, fixed: 150 },
+    '13x18': { ink: 500, paper: 1100, fixed: 200 },
+    'A4': { ink: 850, paper: 1900, fixed: 250 }
+  };
+
+  const defaultPrices = {
+    '10x15': { family: 1750, market: 3250 },
+    '13x18': { family: 3500, orders: 5750 },
+    'A4': { family: 7000, pro: 13750 }
+  };
+
+  // État des configurations
+  const [config, setConfig] = useState({
+    currentPrinterPrice: 800000,
+    targetPrinterPrice: 2000000,
+    targetCameraPrice: 2500000,
+    depreciationMonths: 24,
+    monthlyVolume: 100,
+    exchangeRate: 5000
+  });
+
+  // État des volumes par format
+  const [volumes, setVolumes] = useState({
+    '10x15': 40,
+    '13x18': 35,
+    'A4': 25
+  });
+
+  // État des coûts de base (modifiables)
+  const [costs, setCosts] = useState(baseCosts);
+  const [prices, setPrices] = useState(defaultPrices);
+  const [fixedMonthlyCosts, setFixedMonthlyCosts] = useState(30000);
+
+  // Calculs dérivés
+  const [calculations, setCalculations] = useState({
+    costPerPrint: {},
+    margins: {},
+    breakEven: {},
+    cumulativeProjection: [],
+    optimalScenario: {}
+  });
+
+  // Référence pour le graphique
+  const chartRef = useRef(null);
+
+  // Formater les nombres en Ariary avec séparateurs
+  const formatAriary = (amount) => {
+    return new Intl.NumberFormat('fr-MG', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(amount) + ' Ar';
+  };
+
+  // Calculer le coût de revient par tirage
+  const calculateCostPerPrint = () => {
+    const totalMonthlyVolume = Object.values(volumes).reduce((a, b) => a + b, 0);
+    const depreciationPerPrint = config.targetPrinterPrice / (config.depreciationMonths * totalMonthlyVolume);
+    
+    const costPerPrint = {};
+    Object.keys(costs).forEach(format => {
+      const formatCosts = costs[format];
+      costPerPrint[format] = {
+        ink: formatCosts.ink,
+        paper: formatCosts.paper,
+        fixed: formatCosts.fixed,
+        depreciation: Math.round(depreciationPerPrint),
+        total: formatCosts.ink + formatCosts.paper + formatCosts.fixed + Math.round(depreciationPerPrint)
+      };
+    });
+    
+    return costPerPrint;
+  };
+
+  // Calculer les marges par canal
+  const calculateMargins = (costPerPrint) => {
+    const margins = {};
+    
+    // Format 10x15
+    margins['10x15'] = {
+      family: prices['10x15'].family - costPerPrint['10x15'].total,
+      market: prices['10x15'].market - costPerPrint['10x15'].total
+    };
+    
+    // Format 13x18
+    margins['13x18'] = {
+      family: prices['13x18'].family - costPerPrint['13x18'].total,
+      orders: prices['13x18'].orders - costPerPrint['13x18'].total
+    };
+    
+    // Format A4
+    margins['A4'] = {
+      family: prices['A4'].family - costPerPrint['A4'].total,
+      pro: prices['A4'].pro - costPerPrint['A4'].total
+    };
+    
+    return margins;
+  };
+
+  // Calculer le seuil de rentabilité
+  const calculateBreakEven = (costPerPrint) => {
+    const breakEven = {};
+    const totalFixedCosts = fixedMonthlyCosts + (config.targetCameraPrice / config.depreciationMonths);
+    
+    Object.keys(costPerPrint).forEach(format => {
+      const cost = costPerPrint[format].total;
+      const bestMargin = Math.max(...Object.values(calculations.margins[format] || {0: 0}));
+      breakEven[format] = bestMargin > 0 ? Math.ceil(totalFixedCosts / bestMargin) : Infinity;
+    });
+    
+    return breakEven;
+  };
+
+  // Calculer la projection cumulative sur 24 mois
+  const calculateCumulativeProjection = (margins) => {
+    const projection = [];
+    let cumulative = 0;
+    const monthlyFixedCosts = fixedMonthlyCosts + (config.targetCameraPrice / config.depreciationMonths);
+    
+    // Trouver le canal le plus rentable pour chaque format
+    const bestChannels = {
+      '10x15': margins['10x15'].market > margins['10x15'].family ? 'market' : 'family',
+      '13x18': margins['13x18'].orders > margins['13x18'].family ? 'orders' : 'family',
+      'A4': margins['A4'].pro > margins['A4'].family ? 'pro' : 'family'
+    };
+    
+    for (let month = 1; month <= 24; month++) {
+      let monthlyProfit = 0;
+      
+      // Calculer le profit pour chaque format
+      Object.keys(volumes).forEach(format => {
+        const volume = volumes[format];
+        const channel = bestChannels[format];
+        const margin = margins[format][channel];
+        monthlyProfit += volume * margin;
+      });
+      
+      // Soustraire les coûts fixes
+      monthlyProfit -= monthlyFixedCosts;
+      cumulative += monthlyProfit;
+      
+      projection.push({
+        month,
+        monthlyProfit: Math.max(0, monthlyProfit),
+        cumulative: Math.max(0, cumulative)
+      });
+    }
+    
+    return projection;
+  };
+
+  // Déterminer le scénario optimal
+  const calculateOptimalScenario = (margins, breakEven) => {
+    // Trouver le format le plus rentable
+    let bestFormat = '';
+    let bestMargin = 0;
+    let bestChannel = '';
+    
+    Object.keys(margins).forEach(format => {
+      Object.keys(margins[format]).forEach(channel => {
+        if (margins[format][channel] > bestMargin) {
+          bestMargin = margins[format][channel];
+          bestFormat = format;
+          bestChannel = channel;
+        }
+      });
+    });
+    
+    // Calculer le temps pour atteindre l'objectif
+    const targetAmount = config.targetPrinterPrice + config.targetCameraPrice;
+    const monthlyFixedCosts = fixedMonthlyCosts + (config.targetCameraPrice / config.depreciationMonths);
+    const monthlyProfit = volumes[bestFormat] * bestMargin - monthlyFixedCosts;
+    const monthsToTarget = monthlyProfit > 0 ? Math.ceil(targetAmount / monthlyProfit) : Infinity;
+    
+    return {
+      format: bestFormat,
+      channel: bestChannel,
+      monthlyVolume: volumes[bestFormat],
+      monthsToTarget: monthsToTarget > 24 ? '>24' : monthsToTarget,
+      marginPerUnit: bestMargin
+    };
+  };
+
+  // Mettre à jour tous les calculs
+  useEffect(() => {
+    const costPerPrint = calculateCostPerPrint();
+    const margins = calculateMargins(costPerPrint);
+    const breakEven = calculateBreakEven(costPerPrint);
+    const cumulativeProjection = calculateCumulativeProjection(margins);
+    const optimalScenario = calculateOptimalScenario(margins, breakEven);
+    
+    setCalculations({
+      costPerPrint,
+      margins,
+      breakEven,
+      cumulativeProjection,
+      optimalScenario
+    });
+  }, [config, volumes, costs, prices, fixedMonthlyCosts]);
+
+  // Gérer les changements de configuration
+  const handleConfigChange = (key, value) => {
+    setConfig(prev => ({
+      ...prev,
+      [key]: Number(value)
+    }));
+  };
+
+  // Gérer les changements de volume
+  const handleVolumeChange = (format, value) => {
+    setVolumes(prev => ({
+      ...prev,
+      [format]: Number(value)
+    }));
+  };
+
+  // Gérer les changements de coûts
+  const handleCostChange = (format, costType, value) => {
+    setCosts(prev => ({
+      ...prev,
+      [format]: {
+        ...prev[format],
+        [costType]: Number(value)
+      }
+    }));
+  };
+
+  // Gérer les changements de prix
+  const handlePriceChange = (format, channel, value) => {
+    setPrices(prev => ({
+      ...prev,
+      [format]: {
+        ...prev[format],
+        [channel]: Number(value)
+      }
+    }));
+  };
+
+  // Données pour le graphique
+  const chartData = {
+    labels: calculations.cumulativeProjection.map(p => `Mois ${p.month}`),
+    datasets: [
+      {
+        label: 'Profit Cumulatif',
+        data: calculations.cumulativeProjection.map(p => p.cumulative),
+        borderColor: 'rgb(59, 130, 246)',
+        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+        fill: true,
+        tension: 0.4
+      },
+      {
+        label: 'Objectif (Équipement)',
+        data: Array(24).fill(config.targetPrinterPrice + config.targetCameraPrice),
+        borderColor: 'rgb(239, 68, 68)',
+        borderDash: [5, 5],
+        fill: false,
+        tension: 0
+      }
+    ]
+  };
+
+  const chartOptions = {
+    responsive: true,
+    plugins: {
+      legend: {
+        position: 'top',
+      },
+      tooltip: {
+        callbacks: {
+          label: (context) => `${context.dataset.label}: ${formatAriary(context.raw)}`
+        }
+      }
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        ticks: {
+          callback: (value) => formatAriary(value)
+        }
+      }
+    }
+  };
+
+  // Obtenir la couleur du badge selon la rentabilité
+  const getMarginBadgeColor = (margin) => {
+    if (margin > 2000) return 'bg-green-100 text-green-800';
+    if (margin > 1000) return 'bg-yellow-100 text-yellow-800';
+    return 'bg-red-100 text-red-800';
+  };
+
+  // Rendu des cartes de métriques
+  const renderMetricCards = () => {
+    const totalMonthlyVolume = Object.values(volumes).reduce((a, b) => a + b, 0);
+    const totalInvestment = config.targetPrinterPrice + config.targetCameraPrice;
+    const monthlyRevenue = Object.keys(volumes).reduce((sum, format) => {
+      const bestChannel = calculations.optimalScenario.format === format ? 
+        calculations.optimalScenario.channel : 
+        Object.keys(calculations.margins[format] || {})[0];
+      const price = prices[format][bestChannel] || 0;
+      return sum + (volumes[format] * price);
+    }, 0);
+    
+    const monthlyProfit = monthlyRevenue - 
+      (Object.keys(volumes).reduce((sum, format) => {
+        return sum + (volumes[format] * calculations.costPerPrint[format]?.total || 0);
+      }, 0)) - fixedMonthlyCosts;
+
+    return [
+      {
+        title: 'Investissement Total',
+        value: formatAriary(totalInvestment),
+        description: 'Imprimante + Appareil photo',
+        color: 'bg-blue-50 border-blue-200'
+      },
+      {
+        title: 'Volume Mensuel Total',
+        value: totalMonthlyVolume,
+        description: 'Tirages tous formats',
+        color: 'bg-green-50 border-green-200'
+      },
+      {
+        title: 'Revenu Mensuel Estimé',
+        value: formatAriary(monthlyRevenue),
+        description: 'Chiffre d\'affaires projeté',
+        color: 'bg-purple-50 border-purple-200'
+      },
+      {
+        title: 'Profit Mensuel Estimé',
+        value: formatAriary(monthlyProfit),
+        description: 'Après tous les coûts',
+        color: 'bg-amber-50 border-amber-200'
+      }
+    ];
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-4 md:p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* En-tête */}
+        <header className="mb-8">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">My First Lab</h1>
+              <p className="text-gray-600 mt-1">Simulateur de Carrière Photographique à Madagascar</p>
+            </div>
+            <div className="text-sm text-gray-500">
+              <p>Tous les montants en Ariary (Ar)</p>
+              <p>Taux de change: 1€ = {formatAriary(config.exchangeRate)}</p>
+            </div>
+          </div>
+        </header>
+
+        {/* Cartes de métriques résumées */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          {renderMetricCards().map((metric, index) => (
+            <div key={index} className={`border rounded-xl p-4 ${metric.color}`}>
+              <h3 className="text-sm font-medium text-gray-600">{metric.title}</h3>
+              <p className="text-2xl font-bold text-gray-900 mt-2">{metric.value}</p>
+              <p className="text-xs text-gray-500 mt-1">{metric.description}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Panneau de configuration */}
+          <div className="lg:col-span-1">
+            <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Configuration</h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Prix imprimante actuelle (Ar)
+                  </label>
+                  <input
+                    type="number"
+                    value={config.currentPrinterPrice}
+                    onChange={(e) => handleConfigChange('currentPrinterPrice', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Prix imprimante cible 6 encres (Ar)
+                  </label>
+                  <input
+                    type="number"
+                    value={config.targetPrinterPrice}
+                    onChange={(e) => handleConfigChange('targetPrinterPrice', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Prix appareil photo cible (Ar)
+                  </label>
+                  <input
+                    type="number"
+                    value={config.targetCameraPrice}
+                    onChange={(e) => handleConfigChange('targetCameraPrice', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Durée d'amortissement (mois)
+                  </label>
+                  <select
+                    value={config.depreciationMonths}
+                    onChange={(e) => handleConfigChange('depreciationMonths', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="12">12 mois</option>
+                    <option value="24">24 mois</option>
+                    <option value="36">36 mois</option>
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Taux de change Ar/€
+                  </label>
+                  <input
+                    type="number"
+                    value={config.exchangeRate}
+                    onChange={(e) => handleConfigChange('exchangeRate', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Frais fixes mensuels (Ar)
+                  </label>
+                  <input
+                    type="number"
+                    value={fixedMonthlyCosts}
+                    onChange={(e) => setFixedMonthlyCosts(Number(e.target.value))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Volumes mensuels par format */}
+            <div className="bg-white rounded-xl shadow-sm border p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Volumes Mensuels</h2>
+              
+              <div className="space-y-6">
+                {Object.keys(volumes).map((format) => (
+                  <div key={format}>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-sm font-medium text-gray-700">
+                        Format {format}
+                      </label>
+                      <span className="text-lg font-semibold text-blue-600">
+                        {volumes[format]} tirages
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={volumes[format]}
+                      onChange={(e) => handleVolumeChange(format, e.target.value)}
+                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <div className="flex justify-between text-xs text-gray-500 mt-1">
+                      <span>0</span>
+                      <span>50</span>
+                      <span>100</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Contenu principal */}
+          <div className="lg:col-span-2">
+            {/* Tableau COGS */}
+            <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Coût de Revient par Tirage</h2>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Format</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Encre</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Papier</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Fixes</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Amortissement</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {Object.keys(calculations.costPerPrint || {}).map((format) => {
+                      const cost = calculations.costPerPrint[format];
+                      return (
+                        <tr key={format}>
+                          <td className="py-3 px-4 font-medium text-gray-900">{format}</td>
+                          <td className="py-3 px-4">
+                            <input
+                              type="number"
+                              value={costs[format].ink}
+                              onChange={(e) => handleCostChange(format, 'ink', e.target.value)}
+                              className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
+                            />
+                          </td>
+                          <td className="py-3 px-4">
+                            <input
+                              type="number"
+                              value={costs[format].paper}
+                              onChange={(e) => handleCostChange(format, 'paper', e.target.value)}
+                              className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
+                            />
+                          </td>
+                          <td className="py-3 px-4">
+                            <input
+                              type="number"
+                              value={costs[format].fixed}
+                              onChange={(e) => handleCostChange(format, 'fixed', e.target.value)}
+                              className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
+                            />
+                          </td>
+                          <td className="py-3 px-4 text-gray-600">{formatAriary(cost?.depreciation || 0)}</td>
+                          <td className="py-3 px-4 font-semibold text-gray-900">
+                            {formatAriary(cost?.total || 0)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Tableau des marges */}
+            <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Marges par Canal de Vente</h2>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Format</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Canal</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Prix de vente</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Coût unitaire</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Marge unitaire</th>
+                      <th className="py-3 px-4 text-left text-sm font-medium text-gray-700">Rentabilité</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {Object.keys(calculations.margins || {}).map((format) => {
+                      const formatMargins = calculations.margins[format];
+                      const cost = calculations.costPerPrint[format]?.total || 0;
+                      
+                      return Object.keys(formatMargins).map((channel) => {
+                        const margin = formatMargins[channel];
+                        const price = prices[format][channel];
+                        
+                        return (
+                          <tr key={`${format}-${channel}`}>
+                            <td className="py-3 px-4 font-medium text-gray-900">{format}</td>
+                            <td className="py-3 px-4 capitalize text-gray-700">
+                              {channel === 'market' ? 'Marché local' : 
+                               channel === 'orders' ? 'Commandes WhatsApp' :
+                               channel === 'pro' ? 'Commandes pro' : 'Famille/proches'}
+                            </td>
+                            <td className="py-3 px-4">
+                              <input
+                                type="number"
+                                value={price}
+                                onChange={(e) => handlePriceChange(format, channel, e.target.value)}
+                                className="w-32 px-2 py-1 border border-gray-300 rounded text-sm"
+                              />
+                            </td>
+                            <td className="py-3 px-4 text-gray-600">{formatAriary(cost)}</td>
+                            <td className="py-3 px-4 font-semibold text-gray-900">
+                              {formatAriary(margin)}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getMarginBadgeColor(margin)}`}>
+                                {margin > 2000 ? 'Élevée' : margin > 1000 ? 'Moyenne' : 'Faible'}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Graphique de projection */}
+            <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Projection sur 24 Mois</h2>
+              <div className="h-80">
+                <Line ref={chartRef} data={chartData} options={chartOptions} />
+              </div>
+            </div>
+
+            {/* Scénario optimal et risques */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Scénario optimal */}
+              <div className="bg-white rounded-xl shadow-sm border p-6">
+                <h2 className="text-xl font-bold text-gray-900 mb-4">Scénario Optimal Recommandé</h2>
+                
+                {calculations.optimalScenario && (
+                  <div className="space-y-4">
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-sm text-gray-600">Format prioritaire</p>
+                          <p className="text-lg font-bold text-gray-900">{calculations.optimalScenario.format}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm text-gray-600">Canal recommandé</p>
+                          <p className="text-lg font-bold text-gray-900 capitalize">
+                            {calculations.optimalScenario.channel === 'market' ? 'Marché local' : 
+                             calculations.optimalScenario.channel === 'orders' ? 'Commandes WhatsApp' :
+                             calculations.optimalScenario.channel === 'pro' ? 'Commandes pro' : 'Famille/proches'}
+                          </p>
+                        </div>
+                      </div>
+                      
+                      <div className="mt-4 grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-sm text-gray-600">Cadence mensuelle</p>
+                          <p className="text-lg font-bold text-gray-900">
+                            {calculations.optimalScenario.monthlyVolume} tirages
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-600">Marge unitaire</p>
+                          <p className="text-lg font-bold text-gray-900">
+                            {formatAriary(calculations.optimalScenario.marginPerUnit || 0)}
+                          </p>
+                        </div>
+                      </div>
+                      
+                      <div className="mt-4 pt-4 border-t border-blue-200">
+                        <p className="text-sm text-gray-600">Mois pour atteindre l'objectif</p>
+                        <p className="text-2xl font-bold text-blue-600">
+                          {calculations.optimalScenario.monthsToTarget} mois
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="text-sm text-gray-600">
+                      <p className="font-medium mb-2">Recommandations :</p>
+                      <ul className="list-disc pl-5 space-y-1">
+                        <li>Concentrez-vous sur le format {calculations.optimalScenario.format}</li>
+                        <li>Développez le canal "{calculations.optimalScenario.channel === 'market' ? 'Marché local' : 
+                             calculations.optimalScenario.channel === 'orders' ? 'Commandes WhatsApp' :
+                             calculations.optimalScenario.channel === 'pro' ? 'Commandes pro' : 'Famille/proches'}"</li>
+                        <li>Maintenez un volume minimum de {calculations.optimalScenario.monthlyVolume} tirages/mois</li>
+                        <li>Réévaluez votre stratégie tous les 3 mois</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Section risques */}
+              <div className="bg-white rounded-xl shadow-sm border p-6">
+                <h2 className="text-xl font-bold text-gray-900 mb-4">Analyse des Risques</h2>
+                
+                <div className="space-y-4">
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                    <h3 className="font-medium text-red-800 mb-2">Seuils de Rentabilité</h3>
+                    <div className="space-y-2">
+                      {Object.keys(calculations.breakEven || {}).map((format) => (
+                        <div key={format} className="flex justify-between items-center">
+                          <span className="text-sm text-gray-700">Format {format}</span>
+                          <span className="font-semibold text-gray-900">
+                            {calculations.breakEven[format] === Infinity ? 
+                              'Non rentable' : 
+                              `${calculations.breakEven[format]} tirages/mois`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                    <h3 className="font-medium text-yellow-800 mb-2">Risques Identifiés</h3>
+                    <ul className="list-disc pl-5 space-y-1 text-sm text-gray-700">
+                      <li>Fluctuation des prix du papier et des encres</li>
+                      <li>Variation de la demande saisonnière</li>
+                      <li>Concurrence sur les prix dans le marché local</li>
+                      <li>Délais de paiement des clients professionnels</li>
+                      <li>Coûts de maintenance imprévus de l'équipement</li>
+                    </ul>
+                  </div>
+                  
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                    <h3 className="font-medium text-green-800 mb-2">Atténuation des Risques</h3>
+                    <ul className="list-disc pl-5 space-y-1 text-sm text-gray-700">
+                      <li>Diversifier les canaux de vente</li>
+                      <li>Établir des contrats avec les clients pro</li>
+                      <li>Maintenir un fonds de roulement de 3 mois</li>
+                      <li>Surveiller régulièrement les coûts variables</li>
+                      <li>Développer une clientèle fidèle</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Pied de page */}
+        <footer className="mt-8 pt-6 border-t border-gray-200">
+          <div className="text-center text-sm text-gray-500">
+            <p>My First Lab - Simulateur de Carrière Photographique © {new Date().getFullYear()}</p>
+            <p className="mt-1">Tous les calculs sont en Ariary (Ar). Les résultats sont des estimations.</p>
+            <div className="mt-4 flex justify-center space-x-6">
+              <button 
+                onClick={() => {
+                  setConfig({
+                    currentPrinterPrice: 800000,
+                    targetPrinterPrice: 2000000,
+                    targetCameraPrice: 2500000,
+                    depreciationMonths: 24,
+                    monthlyVolume: 100,
+                    exchangeRate: 5000
+                  });
+                  setVolumes({
+                    '10x15': 40,
+                    '13x18': 35,
+                    'A4': 25
+                  });
+                  setCosts(baseCosts);
+                  setPrices(defaultPrices);
+                  setFixedMonthlyCosts(30000);
+                }}
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors"
+              >
+                Réinitialiser
+              </button>
+              <button 
+                onClick={() => window.print()}
+                className="px-4 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg transition-colors"
+              >
+                Imprimer le rapport
+              </button>
+              <button 
+                onClick={() => {
+                  const data = {
+                    config,
+                    volumes,
+                    costs,
+                    prices,
+                    fixedMonthlyCosts,
+                    calculations
+                  };
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'my-first-lab-simulation.json';
+                  a.click();
+                }}
+                className="px-4 py-2 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg transition-colors"
+              >
+                Exporter les données
+              </button>
+            </div>
+          </div>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
+export default PhotographyCareerSimulator;
